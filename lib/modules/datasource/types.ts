@@ -46,6 +46,7 @@ export interface GetPkgReleasesConfig {
   versioning?: string;
   extractVersion?: string;
   versionCompatibility?: string;
+  compatibilityVersioning?: string;
   currentCompatibility?: string;
   constraints?: Record<string, string>;
   replacementName?: string;

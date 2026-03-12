@@ -1373,6 +1373,17 @@ const options: Readonly<RenovateOptions>[] = [
     env: false,
   },
   {
+    name: 'compatibilityVersioning',
+    description:
+      'Versioning to use for the compatibility part of version strings when using versionCompatibility.',
+    type: 'string',
+    allowedValues: getVersioningList(),
+    experimental: true,
+    experimentalIssues: [0],
+    cli: false,
+    env: false,
+  },
+  {
     name: 'versioning',
     description: 'Versioning to use for filtering and comparisons.',
     type: 'string',

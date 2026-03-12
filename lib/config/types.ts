@@ -157,6 +157,7 @@ export interface RenovateSharedConfig {
   updateNotScheduled?: boolean;
   versioning?: string;
   versionCompatibility?: string;
+  compatibilityVersioning?: string;
 }
 
 /**
