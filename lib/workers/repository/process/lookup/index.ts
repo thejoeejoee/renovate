@@ -21,6 +21,7 @@ import {
 } from '../../../../modules/datasource/index.ts';
 import { postprocessRelease } from '../../../../modules/datasource/postprocess-release.ts';
 import { getRangeStrategy } from '../../../../modules/manager/index.ts';
+import { DistroInfo } from '../../../../modules/versioning/distro.ts';
 import { id as dockerVersioningId } from '../../../../modules/versioning/docker/index.ts';
 import * as allVersioning from '../../../../modules/versioning/index.ts';
 import { ExternalHostError } from '../../../../types/errors/external-host-error.ts';
@@ -66,6 +67,157 @@ async function getTimestamp(
 
   const remoteRelease = await postprocessRelease(config, currentRelease);
   return remoteRelease?.releaseTimestamp;
+}
+
+const distroInfoFiles: Record<
+  string,
+  'data/debian-distro-info.json' | 'data/ubuntu-distro-info.json'
+> = {
+  debian: 'data/debian-distro-info.json',
+  ubuntu: 'data/ubuntu-distro-info.json',
+};
+
+interface CompatibilityCandidate {
+  compatibility: string;
+  codename: string | null;
+  order: number;
+  template: string;
+  rank: number;
+}
+
+interface ParsedVersionCompatibility {
+  version: string;
+  compatibility: string;
+}
+
+function extractCodename(
+  compatibility: string,
+  distroInfo: DistroInfo,
+  compatibilityVersioningApi: allVersioning.VersioningApi | null,
+): string | null {
+  const tokens = compatibility
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length > 0);
+
+  for (let i = tokens.length - 1; i >= 0; i -= 1) {
+    if (
+      distroInfo.isCodename(tokens[i]) ||
+      compatibilityVersioningApi?.isVersion(tokens[i])
+    ) {
+      return tokens[i];
+    }
+  }
+
+  return null;
+}
+
+function buildCompatibilityTemplate(
+  compatibility: string,
+  codename: string,
+): string {
+  const marker = '__renovate_codename__';
+  const start = compatibility.toLowerCase().lastIndexOf(codename);
+  if (start < 0) {
+    return compatibility;
+  }
+  const end = start + codename.length;
+  return `${compatibility.slice(0, start)}${marker}${compatibility.slice(end)}`;
+}
+
+function pickBestCompatibility(
+  compatibilityVersioning: string,
+  currentCompatibility: string,
+  candidateCompatibilities: string[],
+): string {
+  const distroInfoFile = distroInfoFiles[compatibilityVersioning];
+  if (!distroInfoFile) {
+    return currentCompatibility;
+  }
+
+  const distroInfo = new DistroInfo(distroInfoFile);
+  let compatibilityVersioningApi: allVersioning.VersioningApi | null = null;
+  try {
+    compatibilityVersioningApi = allVersioning.get(compatibilityVersioning);
+  } catch {
+    compatibilityVersioningApi = null;
+  }
+  const currentCodename = extractCodename(
+    currentCompatibility,
+    distroInfo,
+    compatibilityVersioningApi,
+  );
+  const currentTemplate = currentCodename
+    ? buildCompatibilityTemplate(currentCompatibility, currentCodename)
+    : null;
+
+  const candidates: CompatibilityCandidate[] = candidateCompatibilities
+    .map((compatibility, index) => {
+      const codename = extractCodename(
+        compatibility,
+        distroInfo,
+        compatibilityVersioningApi,
+      );
+      const rank = codename
+        ? parseFloat(distroInfo.getVersionByCodename(codename))
+        : -1;
+      return {
+        compatibility,
+        codename,
+        order: index,
+        rank: Number.isFinite(rank) ? rank : -1,
+        template: codename
+          ? buildCompatibilityTemplate(compatibility, codename)
+          : compatibility,
+      };
+    })
+    .filter((candidate): candidate is CompatibilityCandidate => !!candidate);
+
+  if (candidates.length === 0) {
+    return currentCompatibility;
+  }
+
+  const sameTemplateCandidates = currentTemplate
+    ? candidates.filter((candidate) => candidate.template === currentTemplate)
+    : [];
+  const selectedCandidates =
+    sameTemplateCandidates.length > 0 ? sameTemplateCandidates : candidates;
+
+  let bestCandidate = selectedCandidates[0];
+  for (const candidate of selectedCandidates.slice(1)) {
+    if (candidate.rank < 0 || bestCandidate.rank < 0) {
+      if (candidate.order > bestCandidate.order) {
+        bestCandidate = candidate;
+      }
+      continue;
+    }
+
+    if (candidate.rank >= 0 && bestCandidate.rank >= 0) {
+      if (candidate.rank > bestCandidate.rank) {
+        bestCandidate = candidate;
+      }
+      continue;
+    }
+    if (
+      compatibilityVersioningApi &&
+      bestCandidate.codename &&
+      candidate.codename &&
+      compatibilityVersioningApi.isVersion(bestCandidate.codename) &&
+      compatibilityVersioningApi.isVersion(candidate.codename) &&
+      compatibilityVersioningApi.isGreaterThan(
+        candidate.codename,
+        bestCandidate.codename,
+      )
+    ) {
+      bestCandidate = candidate;
+      continue;
+    }
+    if (candidate.order > bestCandidate.order) {
+      bestCandidate = candidate;
+    }
+  }
+
+  return bestCandidate.compatibility;
 }
 
 export async function lookupUpdates(
@@ -614,9 +766,107 @@ export async function lookupUpdates(
       isString(compareValue) &&
       isString(config.versionCompatibility)
     ) {
+      const versionCompatibilityRegEx = regEx(config.versionCompatibility);
+      const currentValueMatch = versionCompatibilityRegEx.exec(
+        config.currentValue,
+      );
+      const parsedVersionCompatibilities: ParsedVersionCompatibility[] =
+        dependency?.releases
+          .map((release) => {
+            const sourceValue = release.versionOrig ?? release.version;
+            const match = versionCompatibilityRegEx.exec(sourceValue);
+            if (
+              !isString(match?.groups?.version) ||
+              !isString(match?.groups?.compatibility)
+            ) {
+              return null;
+            }
+            return {
+              version: match.groups.version,
+              compatibility: match.groups.compatibility,
+            };
+          })
+          .filter(
+            (
+              parsedCompatibility,
+            ): parsedCompatibility is ParsedVersionCompatibility =>
+              !!parsedCompatibility,
+          ) ?? [];
       for (const update of res.updates) {
         logger.debug({ update });
         if (isString(config.currentValue) && isString(update.newValue)) {
+          if (
+            isString(config.compatibilityVersioning) &&
+            isString(currentValueMatch?.groups?.version) &&
+            isString(currentValueMatch.groups.compatibility)
+          ) {
+            const currentVersion = currentValueMatch.groups.version;
+            const currentCompatibility = currentValueMatch.groups.compatibility;
+            const versionStartIdx = config.currentValue.indexOf(currentVersion);
+            const compatibilityStartIdx =
+              config.currentValue.lastIndexOf(currentCompatibility);
+
+            if (versionStartIdx >= 0 && compatibilityStartIdx >= 0) {
+              const candidateCompatibilities = parsedVersionCompatibilities
+                .filter(
+                  (parsedCompatibility) =>
+                    parsedCompatibility.version === update.newValue,
+                )
+                .map(
+                  (parsedCompatibility) => parsedCompatibility.compatibility,
+                );
+
+              const selectedRelease = dependency?.releases.find(
+                (release) => release.version === update.newValue,
+              );
+
+              const releaseCompatibilityVariants = Array.from(
+                new Set(selectedRelease?.compatibilityVariants ?? []),
+              );
+
+              const availableCompatibilities =
+                releaseCompatibilityVariants.length > 0
+                  ? releaseCompatibilityVariants
+                  : candidateCompatibilities;
+
+              const bestCompatibility = pickBestCompatibility(
+                config.compatibilityVersioning,
+                currentCompatibility,
+                availableCompatibilities,
+              );
+
+              let bestVersion = update.newValue;
+              if (bestCompatibility !== currentCompatibility) {
+                const bestCompatibilityVersions = parsedVersionCompatibilities
+                  .filter(
+                    (parsedCompatibility) =>
+                      parsedCompatibility.compatibility === bestCompatibility,
+                  )
+                  .map((parsedCompatibility) => parsedCompatibility.version);
+
+                if (bestCompatibilityVersions.length > 0) {
+                  bestVersion = bestCompatibilityVersions.sort((a, b) =>
+                    versioningApi.sortVersions(a, b),
+                  )[bestCompatibilityVersions.length - 1];
+                }
+              }
+
+              const versionEndIdx = versionStartIdx + currentVersion.length;
+              const compatibilityEndIdx =
+                compatibilityStartIdx + currentCompatibility.length;
+              const betweenGroups = config.currentValue.slice(
+                versionEndIdx,
+                compatibilityStartIdx,
+              );
+
+              update.newValue = `${config.currentValue.slice(0, versionStartIdx)}${bestVersion}${betweenGroups}${bestCompatibility}${config.currentValue.slice(compatibilityEndIdx)}`;
+              if (isString(update.newVersion)) {
+                update.newVersion = bestVersion;
+              }
+              continue;
+            }
+          }
+
           update.newValue = config.currentValue.replace(
             compareValue,
             update.newValue,

@@ -67,6 +67,7 @@ export interface Release {
   version: string;
   /** The original value to which `extractVersion` was applied */
   versionOrig?: string;
+  compatibilityVariants?: string[];
   newDigest?: string | undefined;
   constraints?: Record<string, string[]>;
   dependencies?: Record<string, string>;

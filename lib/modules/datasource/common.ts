@@ -5,8 +5,10 @@ import {
 import { logger } from '../../logger/index.ts';
 import { filterMap } from '../../util/filter-map.ts';
 import { regEx } from '../../util/regex.ts';
+import { DistroInfo } from '../versioning/distro.ts';
 import * as allVersioning from '../versioning/index.ts';
 import { defaultVersioning } from '../versioning/index.ts';
+import type { VersioningApi } from '../versioning/types.ts';
 import datasources from './api.ts';
 import { CustomDatasource } from './custom/index.ts';
 import type {
@@ -60,14 +62,86 @@ export function applyVersionCompatibility(
   releaseResult: ReleaseResult,
   versionCompatibility: string | undefined,
   currentCompatibility: string | undefined,
+  compatibilityVersioning?: string,
 ): ReleaseResult {
   if (!versionCompatibility) {
     return releaseResult;
   }
 
+  const exactMatchOnly = (
+    releaseCompatibility: string | undefined,
+  ): boolean => {
+    if (releaseCompatibility !== currentCompatibility) {
+      logger.trace(
+        { releaseCompatibility, versionCompatibility },
+        'versionCompatibility: Does not match compatibility',
+      );
+      return false;
+    }
+    return true;
+  };
+
+  let compatibilityVersioningApi: VersioningApi | null = null;
+  let releaseDistroInfo: DistroInfo | null = null;
+  if (compatibilityVersioning) {
+    try {
+      compatibilityVersioningApi = allVersioning.get(compatibilityVersioning);
+      if (compatibilityVersioning === 'debian') {
+        releaseDistroInfo = new DistroInfo('data/debian-distro-info.json');
+      } else if (compatibilityVersioning === 'ubuntu') {
+        releaseDistroInfo = new DistroInfo('data/ubuntu-distro-info.json');
+      }
+    } catch (err) {
+      logger.debug(
+        { err, compatibilityVersioning },
+        'versionCompatibility: Unknown compatibilityVersioning - fallback to exact matching',
+      );
+    }
+  }
+
+  const currentCompatibilityParts =
+    compatibilityVersioningApi && currentCompatibility
+      ? parseCompatibilityString(
+          currentCompatibility,
+          compatibilityVersioningApi,
+        )
+      : null;
+
   const versionCompatibilityRegEx = regEx(versionCompatibility);
+  const shouldFilterToLatestCompatibleVersion =
+    isNonEmptyStringAndNotWhitespace(currentCompatibility) &&
+    !currentCompatibility.startsWith('-');
+
+  let latestCompatibleVersion: string | null = null;
+  if (shouldFilterToLatestCompatibleVersion) {
+    const versioningApi = allVersioning.get(defaultVersioning.id);
+    for (const release of releaseResult.releases) {
+      const sourceVersion = release.version;
+      const regexResult = versionCompatibilityRegEx.exec(sourceVersion);
+      if (!regexResult?.groups?.version) {
+        continue;
+      }
+      if (regexResult.groups.compatibility !== currentCompatibility) {
+        continue;
+      }
+      if (
+        latestCompatibleVersion === null ||
+        versioningApi.sortVersions(
+          regexResult.groups.version,
+          latestCompatibleVersion,
+        ) > 0
+      ) {
+        latestCompatibleVersion = regexResult.groups.version;
+      }
+    }
+  }
+
   releaseResult.releases = filterMap(releaseResult.releases, (release) => {
-    const regexResult = versionCompatibilityRegEx.exec(release.version);
+    const regexResult =
+      versionCompatibilityRegEx.exec(release.version) ??
+      (release.versionOrig
+        ? versionCompatibilityRegEx.exec(release.versionOrig)
+        : null);
     if (!regexResult?.groups?.version) {
       logger.trace(
         { releaseVersion: release.version, versionCompatibility },
@@ -75,13 +149,83 @@ export function applyVersionCompatibility(
       );
       return null;
     }
-    if (regexResult?.groups?.compatibility !== currentCompatibility) {
+
+    if (
+      latestCompatibleVersion !== null &&
+      regexResult.groups.version !== latestCompatibleVersion
+    ) {
       logger.trace(
-        { releaseVersion: release.version, versionCompatibility },
-        'versionCompatibility: Does not match compatibility',
+        {
+          releaseVersion: release.version,
+          versionCompatibility,
+          latestCompatibleVersion,
+          version: regexResult.groups.version,
+        },
+        'versionCompatibility: Does not match latest compatible version',
       );
       return null;
     }
+
+    const releaseCompatibility = regexResult.groups.compatibility;
+    if (!compatibilityVersioningApi) {
+      if (!exactMatchOnly(releaseCompatibility)) {
+        return null;
+      }
+    } else if (releaseCompatibility !== currentCompatibility) {
+      const releaseCompatibilityParts = parseCompatibilityString(
+        releaseCompatibility,
+        compatibilityVersioningApi,
+      );
+      if (!releaseCompatibilityParts) {
+        logger.trace(
+          { releaseVersion: release.version, releaseCompatibility },
+          'versionCompatibility: No distro codename found in compatibility',
+        );
+        return null;
+      }
+
+      if (
+        currentCompatibilityParts &&
+        releaseCompatibilityParts.variant !== currentCompatibilityParts.variant
+      ) {
+        logger.trace(
+          {
+            releaseVersion: release.version,
+            releaseVariant: releaseCompatibilityParts.variant,
+            currentVariant: currentCompatibilityParts.variant,
+          },
+          'versionCompatibility: Variant mismatch',
+        );
+        return null;
+      }
+
+      const isStable = releaseDistroInfo
+        ? releaseDistroInfo.isCodename(
+            releaseCompatibilityParts.distroCodename,
+          ) &&
+          releaseDistroInfo.isReleased(
+            releaseCompatibilityParts.distroCodename,
+          ) &&
+          !releaseDistroInfo.isEolLts(releaseCompatibilityParts.distroCodename)
+        : compatibilityVersioningApi.isStable(
+            releaseCompatibilityParts.distroCodename,
+          );
+
+      if (!isStable) {
+        logger.trace(
+          {
+            releaseVersion: release.version,
+            releaseCompatibility,
+            distroCodename: releaseCompatibilityParts.distroCodename,
+          },
+          'versionCompatibility: Distro compatibility is not stable/active',
+        );
+        return null;
+      }
+    } else if (!exactMatchOnly(releaseCompatibility)) {
+      return null;
+    }
+
     logger.trace(
       {
         releaseVersion: release.version,
@@ -96,7 +240,67 @@ export function applyVersionCompatibility(
     return release;
   });
 
+  if (compatibilityVersioningApi) {
+    const compatibilityVariantsByVersion = new Map<string, Set<string>>();
+
+    for (const release of releaseResult.releases) {
+      const sourceValue = release.versionOrig ?? release.version;
+      const compatibility =
+        versionCompatibilityRegEx.exec(sourceValue)?.groups?.compatibility;
+
+      if (!isNonEmptyStringAndNotWhitespace(compatibility)) {
+        continue;
+      }
+
+      const existingCompatibilities = compatibilityVariantsByVersion.get(
+        release.version,
+      );
+      if (existingCompatibilities) {
+        existingCompatibilities.add(compatibility);
+      } else {
+        compatibilityVariantsByVersion.set(
+          release.version,
+          new Set([compatibility]),
+        );
+      }
+    }
+
+    for (const release of releaseResult.releases) {
+      const compatibilityVariants = compatibilityVariantsByVersion.get(
+        release.version,
+      );
+      if (!compatibilityVariants?.size) {
+        delete release.compatibilityVariants;
+        continue;
+      }
+      release.compatibilityVariants = [...compatibilityVariants];
+    }
+  }
+
   return releaseResult;
+}
+
+function parseCompatibilityString(
+  compatibility: string,
+  versioning: VersioningApi,
+): { variant: string; distroCodename: string } | null {
+  const parts = compatibility
+    .split('-')
+    .filter(isNonEmptyStringAndNotWhitespace);
+
+  for (const [index, part] of parts.entries()) {
+    if (!versioning.isVersion(part)) {
+      continue;
+    }
+
+    const variantParts = parts.slice(0, index);
+    return {
+      variant: variantParts.length > 0 ? `${variantParts.join('-')}-` : '',
+      distroCodename: part,
+    };
+  }
+
+  return null;
 }
 
 export function applyExtractVersion(

@@ -446,6 +446,7 @@ export function applyDatasourceFilters(
     res,
     config.versionCompatibility,
     config.currentCompatibility,
+    config.compatibilityVersioning,
   );
   res = filterValidVersions(res, config);
   res = sortAndRemoveDuplicates(res, config);
