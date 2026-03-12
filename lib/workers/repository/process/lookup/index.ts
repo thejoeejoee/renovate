@@ -792,8 +792,39 @@ export async function lookupUpdates(
             ): parsedCompatibility is ParsedVersionCompatibility =>
               !!parsedCompatibility,
           ) ?? [];
+      const compatibilitiesByVersion = new Map<string, Set<string>>();
+      for (const parsedCompatibility of parsedVersionCompatibilities) {
+        const existingCompatibilities = compatibilitiesByVersion.get(
+          parsedCompatibility.version,
+        );
+        if (existingCompatibilities) {
+          existingCompatibilities.add(parsedCompatibility.compatibility);
+        } else {
+          compatibilitiesByVersion.set(
+            parsedCompatibility.version,
+            new Set([parsedCompatibility.compatibility]),
+          );
+        }
+      }
+      for (const release of dependency?.releases ?? []) {
+        if (!release.compatibilityVariants?.length) {
+          continue;
+        }
+        const existingCompatibilities = compatibilitiesByVersion.get(
+          release.version,
+        );
+        if (existingCompatibilities) {
+          for (const compatibility of release.compatibilityVariants) {
+            existingCompatibilities.add(compatibility);
+          }
+        } else {
+          compatibilitiesByVersion.set(
+            release.version,
+            new Set(release.compatibilityVariants),
+          );
+        }
+      }
       for (const update of res.updates) {
-        logger.debug({ update });
         if (isString(config.currentValue) && isString(update.newValue)) {
           if (
             isString(config.compatibilityVersioning) &&
@@ -807,14 +838,9 @@ export async function lookupUpdates(
               config.currentValue.lastIndexOf(currentCompatibility);
 
             if (versionStartIdx >= 0 && compatibilityStartIdx >= 0) {
-              const candidateCompatibilities = parsedVersionCompatibilities
-                .filter(
-                  (parsedCompatibility) =>
-                    parsedCompatibility.version === update.newValue,
-                )
-                .map(
-                  (parsedCompatibility) => parsedCompatibility.compatibility,
-                );
+              const candidateCompatibilities = Array.from(
+                compatibilitiesByVersion.get(update.newValue) ?? [],
+              );
 
               const selectedRelease = dependency?.releases.find(
                 (release) => release.version === update.newValue,
@@ -837,12 +863,13 @@ export async function lookupUpdates(
 
               let bestVersion = update.newValue;
               if (bestCompatibility !== currentCompatibility) {
-                const bestCompatibilityVersions = parsedVersionCompatibilities
-                  .filter(
-                    (parsedCompatibility) =>
-                      parsedCompatibility.compatibility === bestCompatibility,
+                const bestCompatibilityVersions = Array.from(
+                  compatibilitiesByVersion.entries(),
+                )
+                  .filter(([, compatibilities]) =>
+                    compatibilities.has(bestCompatibility),
                   )
-                  .map((parsedCompatibility) => parsedCompatibility.version);
+                  .map(([version]) => version);
 
                 if (bestCompatibilityVersions.length > 0) {
                   bestVersion = bestCompatibilityVersions.sort((a, b) =>
