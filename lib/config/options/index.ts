@@ -1379,7 +1379,7 @@ const options: Readonly<RenovateOptions>[] = [
     type: 'string',
     allowedValues: getVersioningList(),
     experimental: true,
-    experimentalIssues: [0],
+    experimentalIssues: [41845],
     cli: false,
     env: false,
   },
