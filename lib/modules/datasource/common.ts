@@ -121,7 +121,24 @@ export function applyVersionCompatibility(
       if (!regexResult?.groups?.version) {
         continue;
       }
-      if (regexResult.groups.compatibility !== currentCompatibility) {
+      if (compatibilityVersioningApi && releaseDistroInfo) {
+        const parsed = parseCompatibilityString(
+          regexResult.groups.compatibility,
+          compatibilityVersioningApi,
+        );
+        if (parsed) {
+          const { distroCodename } = parsed;
+          const isStable =
+            releaseDistroInfo.isCodename(distroCodename) &&
+            releaseDistroInfo.isReleased(distroCodename) &&
+            !releaseDistroInfo.isEolLts(distroCodename);
+          if (!isStable) {
+            continue;
+          }
+        } else {
+          continue;
+        }
+      } else if (regexResult.groups.compatibility !== currentCompatibility) {
         continue;
       }
       if (
