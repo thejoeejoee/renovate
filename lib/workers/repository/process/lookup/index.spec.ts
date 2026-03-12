@@ -4231,6 +4231,155 @@ describe('workers/repository/process/lookup/index', () => {
       });
     });
 
+    describe('with compatibilityVersioning', () => {
+      it('reconstructs combined version and distro update for bookworm to trixie', async () => {
+        config.currentValue = '3.12-bookworm';
+        config.packageName = 'python';
+        config.datasource = DockerDatasource.id;
+        config.versioning = dockerVersioningId;
+        config.versionCompatibility =
+          '^(?<version>[^-]+)-(?<compatibility>.+)$';
+        config.compatibilityVersioning = 'debian';
+        getDockerReleases.mockResolvedValueOnce({
+          releases: [
+            { version: '3.12-bookworm' },
+            { version: '3.13-bookworm' },
+            { version: '3.14-bookworm' },
+            { version: '3.14-trixie' },
+          ],
+        });
+
+        const res = await Result.wrap(
+          lookup.lookupUpdates(config),
+        ).unwrapOrThrow();
+
+        expect(res.updates).toMatchObject([
+          {
+            newValue: '3.14-trixie',
+            newVersion: '3.14',
+            updateType: 'minor',
+          },
+        ]);
+      });
+
+      it('updates version only when no newer distro exists', async () => {
+        config.currentValue = '3.12-bookworm';
+        config.packageName = 'python';
+        config.datasource = DockerDatasource.id;
+        config.versioning = dockerVersioningId;
+        config.versionCompatibility =
+          '^(?<version>[^-]+)-(?<compatibility>.+)$';
+        config.compatibilityVersioning = 'debian';
+        getDockerReleases.mockResolvedValueOnce({
+          releases: [
+            { version: '3.12-bookworm' },
+            { version: '3.13-bookworm' },
+            { version: '3.14-bookworm' },
+          ],
+        });
+
+        const res = await Result.wrap(
+          lookup.lookupUpdates(config),
+        ).unwrapOrThrow();
+
+        expect(res.updates).toMatchObject([
+          {
+            newValue: '3.14-bookworm',
+            newVersion: '3.14',
+            updateType: 'minor',
+          },
+        ]);
+      });
+
+      it('preserves variant while updating distro in combined update', async () => {
+        config.currentValue = '3.12-slim-bookworm';
+        config.packageName = 'python';
+        config.datasource = DockerDatasource.id;
+        config.versioning = dockerVersioningId;
+        config.versionCompatibility =
+          '^(?<version>[^-]+)-(?<compatibility>.+)$';
+        config.compatibilityVersioning = 'debian';
+        getDockerReleases.mockResolvedValueOnce({
+          releases: [
+            { version: '3.12-slim-bookworm' },
+            { version: '3.14-slim-bookworm' },
+            { version: '3.14-slim-trixie' },
+          ],
+        });
+
+        const res = await Result.wrap(
+          lookup.lookupUpdates(config),
+        ).unwrapOrThrow();
+
+        expect(res.updates).toMatchObject([
+          {
+            newValue: '3.14-slim-trixie',
+            newVersion: '3.14',
+            updateType: 'minor',
+          },
+        ]);
+      });
+
+      it('reconstructs combined version and distro update for ubuntu', async () => {
+        config.currentValue = '18-jammy';
+        config.packageName = 'ubuntu';
+        config.datasource = DockerDatasource.id;
+        config.versioning = dockerVersioningId;
+        config.versionCompatibility =
+          '^(?<version>[^-]+)-(?<compatibility>.+)$';
+        config.compatibilityVersioning = 'ubuntu';
+        getDockerReleases.mockResolvedValueOnce({
+          releases: [
+            { version: '18-jammy' },
+            { version: '20-jammy' },
+            { version: '20-noble' },
+            { version: '22-noble' },
+          ],
+        });
+
+        const res = await Result.wrap(
+          lookup.lookupUpdates(config),
+        ).unwrapOrThrow();
+
+        expect(res.updates).toMatchObject([
+          {
+            newValue: '22-noble',
+            newVersion: '22',
+            updateType: 'major',
+          },
+        ]);
+      });
+
+      it('preserves existing behavior when compatibilityVersioning is not configured', async () => {
+        config.currentValue = '3.12-bookworm';
+        config.packageName = 'python';
+        config.datasource = DockerDatasource.id;
+        config.versioning = dockerVersioningId;
+        config.versionCompatibility =
+          '^(?<version>[^-]+)-(?<compatibility>.+)$';
+        getDockerReleases.mockResolvedValueOnce({
+          releases: [
+            { version: '3.12-bookworm' },
+            { version: '3.13-bookworm' },
+            { version: '3.14-bookworm' },
+            { version: '3.14-trixie' },
+          ],
+        });
+
+        const res = await Result.wrap(
+          lookup.lookupUpdates(config),
+        ).unwrapOrThrow();
+
+        expect(res.updates).toMatchObject([
+          {
+            newValue: '3.14-bookworm',
+            newVersion: '3.14',
+            updateType: 'minor',
+          },
+        ]);
+      });
+    });
+
     it('handles digest pin for up to date version', async () => {
       config.currentValue = '8.1.0';
       config.packageName = 'node';
