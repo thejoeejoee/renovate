@@ -313,6 +313,111 @@ describe('modules/datasource/common', () => {
       });
     });
 
+    describe('backwards compatibility — no compatibilityVersioning', () => {
+      it('preserves exact match behavior so only compatible releases pass', () => {
+        const releaseResult: ReleaseResult = {
+          releases: [
+            { version: '3.12-bookworm' },
+            { version: '3.14-bookworm' },
+            { version: '3.14-trixie' },
+          ],
+        };
+
+        const result = applyVersionCompatibility(
+          releaseResult,
+          '^(?<version>[^-]+)-(?<compatibility>.+)$',
+          'bookworm',
+        );
+
+        expect(result.releases).toHaveLength(1);
+        expect(result.releases[0].versionOrig).toBe('3.14-bookworm');
+        expect(
+          result.releases.map((release) => release.versionOrig),
+        ).not.toContain('3.14-trixie');
+      });
+
+      it('handles non-distro suffix compatibility with exact matching', () => {
+        const releaseResult: ReleaseResult = {
+          releases: [
+            { version: '2.0.0-alpine3.18' },
+            { version: '2.1.0-alpine3.18' },
+            { version: '2.1.0-alpine3.20' },
+          ],
+        };
+
+        const result = applyVersionCompatibility(
+          releaseResult,
+          '^(?<version>[^-]+)-(?<compatibility>.+)$',
+          'alpine3.18',
+        );
+
+        expect(result.releases).toHaveLength(1);
+        expect(result.releases[0].versionOrig).toBe('2.1.0-alpine3.18');
+      });
+
+      it('keeps version stripping and versionOrig assignment unchanged', () => {
+        const releaseResult: ReleaseResult = {
+          releases: [
+            { version: '3.12.0-bookworm' },
+            { version: '3.14.0-bookworm' },
+          ],
+        };
+
+        const result = applyVersionCompatibility(
+          releaseResult,
+          '^(?<version>[^-]+)-(?<compatibility>.+)$',
+          'bookworm',
+        );
+
+        expect(result.releases).toHaveLength(1);
+        expect(result.releases[0].version).toBe('3.14.0');
+        expect(result.releases[0].versionOrig).toBe('3.14.0-bookworm');
+      });
+
+      it('preserves numeric suffix compatibility exact matching', () => {
+        const releaseResult: ReleaseResult = {
+          releases: [
+            { version: 'node:18-buster' },
+            { version: 'node:20-buster' },
+            { version: 'node:20-bullseye' },
+          ],
+        };
+
+        const result = applyVersionCompatibility(
+          releaseResult,
+          '^[^:]+:(?<version>[^-]+)-(?<compatibility>.+)$',
+          'buster',
+        );
+
+        expect(result.releases).toHaveLength(1);
+        expect(result.releases[0].version).toBe('20');
+        expect(result.releases[0].versionOrig).toBe('node:20-buster');
+      });
+
+      it('falls back to passthrough when versionCompatibility is undefined', () => {
+        const releaseResult: ReleaseResult = {
+          releases: [
+            { version: '1.0' },
+            { version: '1.1' },
+            { version: '2.0' },
+          ],
+        };
+
+        const result = applyVersionCompatibility(
+          releaseResult,
+          undefined,
+          undefined,
+        );
+
+        expect(result).toBe(releaseResult);
+        expect(result.releases).toEqual([
+          { version: '1.0' },
+          { version: '1.1' },
+          { version: '2.0' },
+        ]);
+      });
+    });
+
     it('allows distro-aware debian compatibility updates', () => {
       const distroInput: ReleaseResult = {
         releases: [
