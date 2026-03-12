@@ -253,6 +253,14 @@ describe('modules/datasource/common', () => {
   });
 
   describe('applyVersionCompatibility', () => {
+    const applyVersionCompatibilityWithCompatibilityVersioning =
+      applyVersionCompatibility as (
+        releaseResult: ReleaseResult,
+        versionCompatibility: string | undefined,
+        currentCompatibility: string | undefined,
+        compatibilityVersioning?: string,
+      ) => ReleaseResult;
+
     let input: ReleaseResult;
 
     beforeEach(() => {
@@ -303,6 +311,183 @@ describe('modules/datasource/common', () => {
       ).toMatchObject({
         releases: [{ version: '3.0.0', versionOrig: 'v3.0.0-alpine' }],
       });
+    });
+
+    it('allows distro-aware debian compatibility updates', () => {
+      const distroInput: ReleaseResult = {
+        releases: [
+          { version: '3.12-bookworm' },
+          { version: '3.14-bookworm' },
+          { version: '3.14-trixie' },
+        ],
+      };
+      const versionCompatibility = '^(?<version>[^-]+)-(?<compatibility>.+)$';
+
+      const withoutCompatibilityVersioning = applyVersionCompatibility(
+        {
+          releases: distroInput.releases.map((release) => ({ ...release })),
+        },
+        versionCompatibility,
+        'bookworm',
+      );
+
+      expect(withoutCompatibilityVersioning.releases).toHaveLength(1);
+      expect(withoutCompatibilityVersioning.releases[0].versionOrig).toBe(
+        '3.14-bookworm',
+      );
+
+      const withCompatibilityVersioning =
+        applyVersionCompatibilityWithCompatibilityVersioning(
+          {
+            releases: distroInput.releases.map((release) => ({ ...release })),
+          },
+          versionCompatibility,
+          'bookworm',
+          'debian',
+        );
+
+      expect(withCompatibilityVersioning.releases).toHaveLength(2);
+      expect(
+        withCompatibilityVersioning.releases.map(
+          (release) => release.versionOrig,
+        ),
+      ).toEqual(expect.arrayContaining(['3.14-bookworm', '3.14-trixie']));
+    });
+
+    it('filters out EOL debian distro candidates', () => {
+      const distroInput: ReleaseResult = {
+        releases: [{ version: '3.14-bookworm' }, { version: '3.14-buster' }],
+      };
+      const versionCompatibility = '^(?<version>[^-]+)-(?<compatibility>.+)$';
+
+      const result = applyVersionCompatibilityWithCompatibilityVersioning(
+        distroInput,
+        versionCompatibility,
+        'bullseye',
+        'debian',
+      );
+
+      expect(result.releases).toHaveLength(1);
+      expect(result.releases[0].versionOrig).toBe('3.14-bookworm');
+      expect(
+        result.releases.map((release) => release.versionOrig),
+      ).not.toContain('3.14-buster');
+    });
+
+    it('filters out unreleased future debian distro candidates', () => {
+      const distroInput: ReleaseResult = {
+        releases: [{ version: '3.14-bookworm' }, { version: '3.14-forky' }],
+      };
+      const versionCompatibility = '^(?<version>[^-]+)-(?<compatibility>.+)$';
+
+      const result = applyVersionCompatibilityWithCompatibilityVersioning(
+        distroInput,
+        versionCompatibility,
+        'bullseye',
+        'debian',
+      );
+
+      expect(result.releases).toHaveLength(1);
+      expect(result.releases[0].versionOrig).toBe('3.14-bookworm');
+      expect(
+        result.releases.map((release) => release.versionOrig),
+      ).not.toContain('3.14-forky');
+    });
+
+    it('supports distro-aware ubuntu compatibility updates', () => {
+      const distroInput: ReleaseResult = {
+        releases: [
+          { version: '20-jammy' },
+          { version: '22-jammy' },
+          { version: '22-noble' },
+        ],
+      };
+      const versionCompatibility = '^(?<version>[^-]+)-(?<compatibility>.+)$';
+
+      const result = applyVersionCompatibilityWithCompatibilityVersioning(
+        distroInput,
+        versionCompatibility,
+        'jammy',
+        'ubuntu',
+      );
+
+      expect(result.releases).toHaveLength(2);
+      expect(result.releases.map((release) => release.versionOrig)).toEqual(
+        expect.arrayContaining(['22-jammy', '22-noble']),
+      );
+    });
+
+    it('supports variant-prefixed distro compatibility updates', () => {
+      const distroInput: ReleaseResult = {
+        releases: [
+          { version: '3.12-slim-bookworm' },
+          { version: '3.14-slim-bookworm' },
+          { version: '3.14-slim-trixie' },
+        ],
+      };
+      const versionCompatibility = '^(?<version>[^-]+)-(?<compatibility>.+)$';
+
+      const result = applyVersionCompatibilityWithCompatibilityVersioning(
+        distroInput,
+        versionCompatibility,
+        'slim-bookworm',
+        'debian',
+      );
+
+      expect(result.releases).toHaveLength(2);
+      expect(result.releases.map((release) => release.versionOrig)).toEqual(
+        expect.arrayContaining(['3.14-slim-bookworm', '3.14-slim-trixie']),
+      );
+    });
+
+    it('preserves exact matching when compatibilityVersioning is not set', () => {
+      const distroInput: ReleaseResult = {
+        releases: [
+          { version: '3.12-bookworm' },
+          { version: '3.14-bookworm' },
+          { version: '3.14-trixie' },
+        ],
+      };
+      const versionCompatibility = '^(?<version>[^-]+)-(?<compatibility>.+)$';
+
+      const result = applyVersionCompatibility(
+        distroInput,
+        versionCompatibility,
+        'bookworm',
+      );
+
+      expect(result.releases).toHaveLength(1);
+      expect(result.releases[0].versionOrig).toBe('3.14-bookworm');
+    });
+
+    it('falls back to exact matching for unknown compatibilityVersioning', () => {
+      const distroInput: ReleaseResult = {
+        releases: [
+          { version: '3.12-bookworm' },
+          { version: '3.14-bookworm' },
+          { version: '3.14-trixie' },
+        ],
+      };
+      const versionCompatibility = '^(?<version>[^-]+)-(?<compatibility>.+)$';
+
+      expect(() =>
+        applyVersionCompatibilityWithCompatibilityVersioning(
+          distroInput,
+          versionCompatibility,
+          'bookworm',
+          'nonexistent-versioning-scheme',
+        ),
+      ).not.toThrow();
+
+      const result = applyVersionCompatibilityWithCompatibilityVersioning(
+        distroInput,
+        versionCompatibility,
+        'bookworm',
+        'nonexistent-versioning-scheme',
+      );
+
+      expect(result.releases).toHaveLength(1);
+      expect(result.releases[0].versionOrig).toBe('3.14-bookworm');
     });
   });
 });
