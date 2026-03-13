@@ -13,3 +13,19 @@ export interface PypiJSON {
 
   releases?: Releases;
 }
+
+export interface SimpleApiFile {
+  filename: string;
+  url: string;
+  hashes: Record<string, string>;
+  'requires-python'?: string;
+  'upload-time'?: string;
+  yanked?: string | boolean;
+}
+
+export interface SimpleApiJSON {
+  meta: { 'api-version': string };
+  name: string;
+  versions: string[];
+  files: SimpleApiFile[];
+}

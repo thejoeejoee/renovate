@@ -13,6 +13,8 @@ const res1 = Fixtures.get('azure-cli-monitor.json');
 const htmlResponse = Fixtures.get('versions-html.html');
 const mixedCaseResponse = Fixtures.get('versions-html-mixed-case.html');
 const withPeriodsResponse = Fixtures.get('versions-html-with-periods.html');
+const simpleJsonResponse = Fixtures.get('simple-json-response.json');
+const simpleJsonNoTimestamps = Fixtures.get('simple-json-no-timestamps.json');
 
 const azureCliMonitorReleases = [
   { releaseTimestamp: '2017-04-03T16:55:14.000Z', version: '0.0.1' },
@@ -790,6 +792,144 @@ describe('modules/datasource/pypi/index', () => {
           constraintsFiltering: 'strict',
         }),
       ).toMatchSnapshot();
+    });
+
+    describe('Simple API JSON', () => {
+      const simpleUrl = 'https://some.registry.org/simple/';
+
+      it('returns releases with timestamps from JSON response', async () => {
+        httpMock
+          .scope(simpleUrl)
+          .get('/dj-database-url/')
+          .matchHeader('accept', /application\/vnd\.pypi\.simple\.v1\+json/)
+          .reply(200, simpleJsonResponse, {
+            'content-type': 'application/vnd.pypi.simple.v1+json',
+          });
+
+        const result = await getPkgReleases({
+          datasource,
+          packageName: 'dj-database-url',
+          registryUrls: [simpleUrl],
+        });
+
+        expect(result).not.toBeNull();
+        expect(result?.releases).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ version: '0.4.1' }),
+            expect.objectContaining({ version: '0.4.2' }),
+            expect.objectContaining({ version: '0.5.0' }),
+          ]),
+        );
+
+        const release041 = result?.releases.find((r) => r.version === '0.4.1');
+        const release042 = result?.releases.find((r) => r.version === '0.4.2');
+        const release050 = result?.releases.find((r) => r.version === '0.5.0');
+
+        expect(release041?.releaseTimestamp).toBeUndefined();
+        expect(release042?.releaseTimestamp).toBe('2023-01-15T10:30:45.000Z');
+        expect(release050?.releaseTimestamp).toBe('2023-06-20T14:22:55.123Z');
+      });
+
+      it('returns releases without timestamps when upload-time not present', async () => {
+        httpMock
+          .scope(simpleUrl)
+          .get('/dj-database-url/')
+          .reply(200, simpleJsonNoTimestamps, {
+            'content-type': 'application/vnd.pypi.simple.v1+json',
+          });
+
+        const result = await getPkgReleases({
+          datasource,
+          packageName: 'dj-database-url',
+          registryUrls: [simpleUrl],
+        });
+
+        expect(result).not.toBeNull();
+        expect(
+          result?.releases.every((release) => !release.releaseTimestamp),
+        ).toBe(true);
+      });
+
+      it('falls back to HTML parsing when Content-Type is text/html', async () => {
+        httpMock
+          .scope(simpleUrl)
+          .get('/dj-database-url/')
+          .reply(200, htmlResponse, {
+            'content-type': 'text/html',
+          });
+
+        const result = await getPkgReleases({
+          datasource,
+          packageName: 'dj-database-url',
+          registryUrls: [simpleUrl],
+        });
+
+        expect(result).toMatchObject({ releases: djDatabaseUrlSimpleReleases });
+      });
+
+      it('handles yanked from JSON response', async () => {
+        httpMock
+          .scope(simpleUrl)
+          .get('/dj-database-url/')
+          .reply(200, simpleJsonResponse, {
+            'content-type': 'application/vnd.pypi.simple.v1+json',
+          });
+
+        const result = await getPkgReleases({
+          datasource,
+          packageName: 'dj-database-url',
+          registryUrls: [simpleUrl],
+        });
+
+        expect(
+          result?.releases.find((r) => r.version === '0.5.0'),
+        ).toMatchObject({
+          isDeprecated: true,
+          version: '0.5.0',
+        });
+      });
+
+      it('handles requires-python from JSON response', async () => {
+        httpMock
+          .scope(simpleUrl)
+          .get('/dj-database-url/')
+          .reply(200, simpleJsonResponse, {
+            'content-type': 'application/vnd.pypi.simple.v1+json',
+          });
+
+        const pypiDatasource = new PypiDatasource();
+        const result = await pypiDatasource.getReleases({
+          packageName: 'dj-database-url',
+          registryUrl: simpleUrl,
+        });
+
+        expect(
+          result?.releases.find((r) => r.version === '0.4.1'),
+        ).toMatchObject({
+          constraints: { python: ['>=3.6'] },
+          version: '0.4.1',
+        });
+        expect(
+          result?.releases.find((r) => r.version === '0.4.2'),
+        ).toMatchObject({
+          constraints: { python: ['>=3.6'] },
+          version: '0.4.2',
+        });
+      });
+
+      it('sends correct Accept header', async () => {
+        httpMock
+          .scope(simpleUrl)
+          .get('/dj-database-url/')
+          .matchHeader('accept', /application\/vnd\.pypi\.simple\.v1\+json/)
+          .reply(200, htmlResponse, { 'content-type': 'text/html' });
+
+        await getPkgReleases({
+          datasource,
+          packageName: 'dj-database-url',
+          registryUrls: [simpleUrl],
+        });
+      });
     });
   });
 

@@ -13,7 +13,12 @@ import { Datasource } from '../datasource.ts';
 import type { GetReleasesConfig, Release, ReleaseResult } from '../types.ts';
 import { getGoogleAuthToken } from '../util.ts';
 import { isGitHubRepo, normalizePythonDepName } from './common.ts';
-import type { PypiJSON, PypiJSONRelease, Releases } from './types.ts';
+import type {
+  PypiJSON,
+  PypiJSONRelease,
+  Releases,
+  SimpleApiJSON,
+} from './types.ts';
 
 export class PypiDatasource extends Datasource {
   static readonly id = 'pypi';
@@ -36,7 +41,7 @@ export class PypiDatasource extends Datasource {
 
   override readonly releaseTimestampSupport = true;
   override readonly releaseTimestampNote =
-    'The relase timestamp is determined from the `upload_time` field in the results. This field is not available when using the simple API.';
+    'The release timestamp is determined from the `upload_time` field in the results.';
   override readonly sourceUrlSupport = 'release';
   override readonly sourceUrlNote =
     'The source URL is determined from the `homepage` field if it is a github repository, else we use the `project_urls` field.';
@@ -250,6 +255,76 @@ export class PypiDatasource extends Datasource {
     );
   }
 
+  private parseSimpleJson(
+    body: string,
+    packageName: string,
+  ): ReleaseResult | null {
+    let data: SimpleApiJSON;
+    try {
+      data = JSON.parse(body) as SimpleApiJSON;
+    } catch {
+      logger.debug({ packageName }, 'Failed to parse Simple API JSON response');
+      return null;
+    }
+
+    const versionMap = new Map<
+      string,
+      { timestamps: string[]; yanked: boolean; requiresPython?: string }
+    >();
+
+    for (const version of data.versions ?? []) {
+      versionMap.set(version, { timestamps: [], yanked: false });
+    }
+
+    for (const file of data.files ?? []) {
+      const version = PypiDatasource.extractVersionFromLinkText(
+        file.filename,
+        packageName,
+      );
+      if (!version || !pep440.isValid(version)) {
+        continue;
+      }
+
+      let entry = versionMap.get(version);
+      if (!entry) {
+        entry = { timestamps: [], yanked: false };
+        versionMap.set(version, entry);
+      }
+
+      if (file['upload-time']) {
+        entry.timestamps.push(file['upload-time']);
+      }
+      if (file.yanked !== undefined && file.yanked !== false) {
+        entry.yanked = true;
+      }
+      if (file['requires-python'] && !entry.requiresPython) {
+        entry.requiresPython = file['requires-python'];
+      }
+    }
+
+    const releases: Release[] = [];
+    for (const [version, entry] of versionMap) {
+      const release: Release = { version };
+      if (entry.timestamps.length > 0) {
+        const maxTimestamp = entry.timestamps.sort().at(-1)!;
+        release.releaseTimestamp = asTimestamp(maxTimestamp);
+      }
+      if (entry.yanked) {
+        release.isDeprecated = true;
+      }
+      if (entry.requiresPython) {
+        release.constraints = { python: [entry.requiresPython] };
+      }
+      releases.push(release);
+    }
+
+    if (releases.length === 0) {
+      return null;
+    }
+
+    return { releases };
+  }
+
   private async getSimpleDependency(
     packageName: string,
     hostUrl: string,
@@ -260,6 +335,8 @@ export class PypiDatasource extends Datasource {
     ).href;
     const dependency: ReleaseResult = { releases: [] };
     const headers = await this.getAuthHeaders(lookupUrl);
+    headers.accept =
+      'application/vnd.pypi.simple.v1+json, application/vnd.pypi.simple.v1+html;q=0.1, text/html;q=0.01';
     const response = await this.http.getText(lookupUrl, { headers });
     const dep = response?.body;
     if (!dep) {
@@ -268,6 +345,16 @@ export class PypiDatasource extends Datasource {
     }
     if (response.authorization) {
       dependency.isPrivate = true;
+    }
+    const contentType = response.headers['content-type'] ?? '';
+    if (contentType.includes('json')) {
+      const jsonDependency = this.parseSimpleJson(dep, packageName);
+      if (jsonDependency) {
+        if (dependency.isPrivate) {
+          jsonDependency.isPrivate = true;
+        }
+        return jsonDependency;
+      }
     }
     const root = parse(PypiDatasource.cleanSimpleHtml(dep));
     const links = root.querySelectorAll('a');
